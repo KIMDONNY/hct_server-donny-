@@ -1,7 +1,6 @@
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
-const net = require("net");
 
 const app = express();
 const server = http.createServer(app);
@@ -9,69 +8,72 @@ const io = new Server(server, {
   cors: { origin: "*" }
 });
 
-// 앱 소켓 ID ↔ 회사PC 소켓 매핑
-const sessionMap = new Map();
+// ⬇️ 클라이언트 소켓 저장소
+const pcClients = new Map();      // PC: key = "ip:port"
+const appClients = new Map();     // 모바일 앱: key = "ip:port"
 
 io.on("connection", (socket) => {
-  console.log("📱 앱 연결됨:", socket.id);
+  console.log("🔌 클라이언트 연결:", socket.id);
 
-  socket.on("connect_pc", ({ ip, port }) => {
-    console.log(`🔌 회사PC(${ip}:${port}) 접속 시도 from ${socket.id}`);
-
-    // 기존 연결 종료
-    if (sessionMap.has(socket.id)) {
-      const { pcSocket } = sessionMap.get(socket.id);
-      pcSocket.end();
-      sessionMap.delete(socket.id);
+  // ✅ 등록 요청: 앱 또는 PC 모두 사용
+  socket.on("register", ({ ip, port, role }) => {
+    const key = `${ip}:${port}`;
+    if (role === "pc") {
+      pcClients.set(key, socket);
+      console.log(`🖥 회사 PC 등록됨: ${key}`);
+    } else if (role === "app") {
+      appClients.set(key, socket);
+      console.log(`📱 앱 등록됨: ${key}`);
+    } else {
+      console.warn("❓ 알 수 없는 역할:", role);
     }
-
-    // 회사PC로 TCP 연결 시도
-    const pcSocket = net.createConnection({ host: ip, port: port }, () => {
-      console.log("✅ 회사PC 연결 성공:", ip, port);
-      socket.emit("connected", { success: true });
-      sessionMap.set(socket.id, { pcSocket, ip, port });
-    });
-
-    pcSocket.on("data", (data) => {
-      const message = data.toString();
-      console.log(`📥 회사PC 응답 (${ip}:${port}): ${message}`);
-
-      // 매핑된 앱 소켓에 전달
-      socket.emit("response", message);
-    });
-
-    pcSocket.on("error", (err) => {
-      console.log("❌ 회사PC 연결 실패:", err.message);
-      socket.emit("connected", { success: false, error: err.message });
-    });
-
-    pcSocket.on("end", () => {
-      console.log("📴 회사PC 연결 종료:", ip, port);
-      socket.emit("disconnected");
-      sessionMap.delete(socket.id);
-    });
   });
 
-  socket.on("command", (cmd) => {
-    if (!sessionMap.has(socket.id)) {
-      socket.emit("error", "회사PC와 연결되지 않음");
-      return;
+  // ✅ 앱 → 서버: 명령 전송 요청
+  socket.on("command", ({ ip, port, command }) => {
+    const key = `${ip}:${port}`;
+    const pcSocket = pcClients.get(key);
+    if (pcSocket) {
+      console.log(`📤 명령 '${command}' 전달 → 회사PC ${key}`);
+      pcSocket.emit("command", command);
+    } else {
+      console.log(`❌ 회사PC 연결 안 됨: ${key}`);
+      socket.emit("error", `회사 PC (${key})와 연결되지 않았습니다.`);
     }
-    const { pcSocket } = sessionMap.get(socket.id);
-    console.log(`📤 명령 전송 → 회사PC: ${cmd}`);
-    pcSocket.write(cmd + "\n");
   });
 
+  // ✅ PC → 서버: 응답 전송
+  socket.on("response", ({ ip, port, message }) => {
+    const key = `${ip}:${port}`;
+    const appSocket = appClients.get(key);
+    if (appSocket) {
+      console.log(`📥 회사PC 응답 수신 → 앱 전달 (${key}): ${message}`);
+      appSocket.emit("response", { message });
+    } else {
+      console.log(`⚠️ 앱 연결 없음, 응답 미전달 (${key})`);
+    }
+  });
+
+  // ✅ 연결 종료 시 정리
   socket.on("disconnect", () => {
-    console.log("❌ 앱 연결 종료:", socket.id);
-    if (sessionMap.has(socket.id)) {
-      const { pcSocket } = sessionMap.get(socket.id);
-      pcSocket.end();
-      sessionMap.delete(socket.id);
+    for (const [key, s] of pcClients.entries()) {
+      if (s.id === socket.id) {
+        pcClients.delete(key);
+        console.log(`🖥 연결 해제: ${key}`);
+        break;
+      }
+    }
+
+    for (const [key, s] of appClients.entries()) {
+      if (s.id === socket.id) {
+        appClients.delete(key);
+        console.log(`📱 연결 해제: ${key}`);
+        break;
+      }
     }
   });
 });
 
 server.listen(3000, () => {
-  console.log("🚀 중계 서버 실행 중 (포트 3000)");
+  console.log("🚀 Render 중계 서버 실행 중 (포트 3000)");
 });
