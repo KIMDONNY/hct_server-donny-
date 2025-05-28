@@ -38,6 +38,13 @@ io.on("connection", (socket) => {
       target.emit("command", command);
     } else {
       console.log(`❌ 대상 PC 없음: ${key}`);
+      if (command === "PING") {
+        const app = appClients[key];
+        if (app) {
+          console.log(`↩️ PING 응답 반환 → ${key}`);
+          app.emit("response", { message: "PING" });
+        }
+      }
     }
   });
 
